@@ -8,6 +8,7 @@ import * as https from "node:https";
 import * as tls from "node:tls";
 import { createHash } from "node:crypto";
 import { createProxyServer } from "../src/proxy.ts";
+import { isProxyRunning } from "../src/cli-utils.ts";
 import { ensureCerts, createSNICallback } from "../src/certs.ts";
 
 assert.ok(process.versions.bun, "Run this regression with Bun");
@@ -83,6 +84,7 @@ try {
       req.setTimeout(5000, () => req.destroy(new Error("TLS request timeout")));
       req.on("error", reject);
     });
+  assert.equal(await isProxyRunning(local.port), true, "startup reuses an existing Bun TLS proxy");
   assert.equal(await request("web.app.localhost"), "ok");
   routes.push(
     { hostname: "trigon.test", port: address.port },

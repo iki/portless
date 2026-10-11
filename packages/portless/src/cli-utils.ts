@@ -1015,7 +1015,14 @@ export async function findFreePort(
  * When `tls` is true, uses HTTPS with certificate verification disabled
  * (the proxy may use a self-signed or locally-trusted CA cert).
  */
-export function isProxyRunning(port: number, tls = false): Promise<boolean> {
+export function isProxyRunning(port: number, tls?: boolean): Promise<boolean> {
+  // Bun's TLS listener cannot accept the plain-HTTP probe on its TLS port.
+  // Preserve explicit protocol probes; auto-detection checks both on Bun.
+  if (tls === undefined && process.versions.bun) {
+    return Promise.all([isProxyRunning(port, false), isProxyRunning(port, true)]).then((results) =>
+      results.some(Boolean)
+    );
+  }
   return new Promise((resolve) => {
     const requestFn = tls ? https.request : http.request;
     const req = requestFn(
