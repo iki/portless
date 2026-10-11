@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
+import { HOSTS_SYNC_PATH, PORTLESS_HEADER, type ProxyServer } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
@@ -1046,6 +1046,18 @@ export function isProxyRunning(port: number, tls?: boolean): Promise<boolean> {
     });
     req.end();
   });
+}
+
+/** A failed hostname must not prevent healthy routes from starting or refreshing. */
+export async function refreshProxyTls(
+  server: ProxyServer,
+  onError: (error: unknown) => void
+): Promise<void> {
+  try {
+    await server.refreshTlsContexts?.();
+  } catch (error) {
+    onError(error);
+  }
 }
 
 /** Display name for the hosts file in user-facing text. */

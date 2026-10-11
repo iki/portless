@@ -8,7 +8,7 @@ import * as https from "node:https";
 import * as tls from "node:tls";
 import { createHash } from "node:crypto";
 import { createProxyServer } from "../src/proxy.ts";
-import { isProxyRunning } from "../src/cli-utils.ts";
+import { isProxyRunning, refreshProxyTls } from "../src/cli-utils.ts";
 import { ensureCerts, createSNICallback } from "../src/certs.ts";
 
 assert.ok(process.versions.bun, "Run this regression with Bun");
@@ -58,6 +58,11 @@ try {
   assert.ok(proxy.refreshTlsContexts);
   await Promise.all([proxy.refreshTlsContexts(), proxy.refreshTlsContexts()]);
   assert.equal(calls, 1, "concurrent preparation reuses a pending context");
+  routes.push({ hostname: "retry.app.localhost", port: address.port });
+  failNext = true;
+  const warnings: unknown[] = [];
+  await refreshProxyTls(proxy, (error) => warnings.push(error));
+  assert.equal(warnings.length, 1, "startup reports the failed host without aborting");
   await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
   const local = proxy.address();
   assert.ok(local && typeof local !== "string");
@@ -93,6 +98,7 @@ try {
   failNext = true;
   await assert.rejects(proxy.refreshTlsContexts(), /injected generation failure/);
   await proxy.refreshTlsContexts();
+  assert.equal(await request("retry.app.localhost"), "ok");
   assert.equal(await request("trigon.test"), "ok");
   assert.equal(await request("trigon.preview"), "ok");
   await new Promise<void>((resolve, reject) => {

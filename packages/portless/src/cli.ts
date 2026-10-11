@@ -75,6 +75,7 @@ import {
   isWildcardEnvEnabled,
   isLanEnvEnabled,
   isProxyRunning,
+  refreshProxyTls,
   isWindows,
   killTree,
   listenOnProxyInterface,
@@ -680,12 +681,19 @@ async function startProxyServer(
     return "acted";
   };
 
+  const reportTlsError = (error: unknown) => {
+    console.warn(
+      colors.yellow(
+        `Could not prepare a hostname's TLS context: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  };
   const reloadRoutes = async () => {
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
       await Promise.all(
-        [server, ...additionalServers].map((listener) => listener.refreshTlsContexts?.())
+        [server, ...additionalServers].map((listener) => refreshProxyTls(listener, reportTlsError))
       );
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
@@ -804,7 +812,7 @@ async function startProxyServer(
         );
       }
     });
-    await additionalServer.refreshTlsContexts?.();
+    await refreshProxyTls(additionalServer, reportTlsError);
     listenOnProxyInterface(additionalServer, proxyPort, bindTarget, () => {
       console.log(
         colors.green(
@@ -834,7 +842,7 @@ async function startProxyServer(
     }
   }
 
-  await server.refreshTlsContexts?.();
+  await refreshProxyTls(server, reportTlsError);
   listenOnProxyInterface(server, proxyPort, primaryBindTarget, () => {
     if (!writeHostsSyncToken(store.dir, hostsSyncToken)) {
       console.warn(colors.yellow("Could not publish hosts sync authorization."));

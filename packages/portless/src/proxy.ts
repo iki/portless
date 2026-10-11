@@ -802,7 +802,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return Object.assign(h2Server, {
         async refreshTlsContexts(): Promise<void> {
           if (!selectContext) return;
-          await Promise.all(
+          const prepared = await Promise.allSettled(
             getRoutes().map(({ hostname }) => {
               let pending = contexts.get(hostname);
               if (!pending) {
@@ -828,6 +828,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
               return pending;
             })
           );
+          const failed = prepared.find((result) => result.status === "rejected");
+          if (failed?.status === "rejected") throw failed.reason;
         },
       });
     }
