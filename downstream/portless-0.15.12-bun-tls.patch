@@ -1,0 +1,172 @@
+diff --git a/dist/chunk-I4ABM6NO.js b/dist/chunk-I4ABM6NO.js
+--- a/dist/chunk-I4ABM6NO.js
++++ b/dist/chunk-I4ABM6NO.js
+@@ -1065,6 +1065,43 @@
+         handleExtendedConnect(req, resOrSocket);
+       }
+     );
++if (process.versions.bun) {
++  const contexts = /* @__PURE__ */ new Map();
++  const selectContext = tls.SNICallback;
++  return Object.assign(h2Server, {
++    async refreshTlsContexts() {
++      if (!selectContext) return;
++      const prepared = await Promise.allSettled(
++        getRoutes().map(({ hostname }) => {
++          let pending = contexts.get(hostname);
++          if (!pending) {
++            pending = new Promise((resolve, reject) => {
++              selectContext(hostname, (error, context) => {
++                if (error || !context) {
++                  reject(error ?? new Error("Missing TLS context for " + hostname));
++                  return;
++                }
++                try {
++                  h2Server.addContext(hostname, context);
++                  resolve();
++                } catch (error2) {
++                  reject(error2);
++                }
++              });
++            }).catch((error) => {
++              contexts.delete(hostname);
++              throw error;
++            });
++            contexts.set(hostname, pending);
++          }
++          return pending;
++        })
++      );
++      const failed = prepared.find((result) => result.status === "rejected");
++      if (failed?.status === "rejected") throw failed.reason;
++    }
++  });
++}
+     const plainServer = http.createServer((req, res) => {
+       const host = getRequestHost(req).split(":")[0] || "localhost";
+       const location = `https://${host}${proxyPort === 443 ? "" : `:${proxyPort}`}${req.url || "/"}`;
+diff --git a/dist/cli.js b/dist/cli.js
+--- a/dist/cli.js
++++ b/dist/cli.js
+@@ -2186,7 +2186,18 @@
+   }
+   throw new Error(`No free port found in range ${minPort}-${maxPort}`);
+ }
+-function isProxyRunning(port, tls2 = false) {
++async function refreshProxyTls(server, onError) {
++  try {
++    await server.refreshTlsContexts?.();
++  } catch (error) {
++    onError(error);
++  }
++}
++
++function isProxyRunning(port, tls2) {
++  if (tls2 === undefined && process.versions.bun) {
++    return Promise.all([isProxyRunning(port, false), isProxyRunning(port, true)]).then((results) => results.some(Boolean));
++  }
+   return new Promise((resolve4) => {
+     const requestFn = tls2 ? https.request : http.request;
+     const req = requestFn(
+@@ -5752,7 +5763,7 @@
+     (message) => console.warn(colors_default.yellow(message))
+   );
+ }
+-function startProxyServer(store, proxyPort, tld, tlds, tlsOptions, lanIp, strict, customCert = false) {
++async function startProxyServer(store, proxyPort, tld, tlds, tlsOptions, lanIp, strict, customCert = false) {
+   store.ensureDir();
+   const isTls = !!tlsOptions;
+   const mdnsSupport = isMdnsSupported();
+@@ -5829,10 +5840,14 @@
+     syncHostsAndLatch(hostnames);
+     return "acted";
+   };
+-  const reloadRoutes = () => {
++  const reportTlsError = (error) => {
++    console.warn(colors_default.yellow(`Could not prepare a hostname's TLS context: ${error instanceof Error ? error.message : String(error)}`));
++  };
++  const reloadRoutes = async () => {
+     try {
+       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
+       cachedRoutes = store.loadRoutes();
++      await Promise.all([server, ...additionalServers].map((listener) => refreshProxyTls(listener, reportTlsError)));
+       if (autoSyncHosts) {
+         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
+       }
+@@ -5853,17 +5868,18 @@
+           }
+         }
+       }
+-    } catch {
++    } catch (error) {
++      console.warn(colors_default.yellow(`Could not refresh routes or TLS contexts: ${error instanceof Error ? error.message : String(error)}`));
+     }
+   };
+   try {
+     watcher = fs10.watch(routesPath, () => {
+       if (debounceTimer) clearTimeout(debounceTimer);
+-      debounceTimer = setTimeout(reloadRoutes, DEBOUNCE_MS);
++      debounceTimer = setTimeout(() => { void reloadRoutes(); }, DEBOUNCE_MS);
+     });
+   } catch {
+     console.warn(colors_default.yellow("fs.watch unavailable; falling back to polling for route changes"));
+-    pollingInterval = setInterval(reloadRoutes, POLL_INTERVAL_MS);
++    pollingInterval = setInterval(() => { void reloadRoutes(); }, POLL_INTERVAL_MS);
+   }
+   if (autoSyncHosts) {
+     syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
+@@ -5912,7 +5928,7 @@
+     closeAuxiliaryServers();
+     process.exit(1);
+   });
+-  const proto = isTls ? "HTTPS/2" : "HTTP";
++  const proto = isTls ? (process.versions.bun ? "HTTPS (HTTP/1.1)" : "HTTPS/2") : "HTTP";
+   const tldLabel = tlds.length > 1 || tld !== DEFAULT_TLD ? ` (TLDs: ${formatTldList2(tlds)})` : "";
+   const modeLabel = strict === false ? " (wildcard)" : "";
+   for (const bindTarget of bindTargets.slice(1)) {
+@@ -5928,6 +5944,7 @@
+         );
+       }
+     });
++    await refreshProxyTls(additionalServer, reportTlsError);
+     listenOnProxyInterface(additionalServer, proxyPort, bindTarget, () => {
+       console.log(
+         colors_default.green(
+@@ -5952,6 +5969,7 @@
+       });
+     }
+   }
++  await refreshProxyTls(server, reportTlsError);
+   listenOnProxyInterface(server, proxyPort, primaryBindTarget, () => {
+     if (!writeHostsSyncToken(store.dir, hostsSyncToken)) {
+       console.warn(colors_default.yellow("Could not publish hosts sync authorization."));
+@@ -8208,7 +8226,7 @@
+   }
+   if (isForeground) {
+     console.log(chalk.blue.bold("\nportless proxy\n"));
+-    startProxyServer(
++    await startProxyServer(
+       store,
+       proxyPort,
+       tld,
+@@ -8268,7 +8286,7 @@
+     }
+     process.exit(1);
+   }
+-  const proto = useHttps ? "HTTPS/2" : "HTTP";
++  const proto = useHttps ? (process.versions.bun ? "HTTPS (HTTP/1.1)" : "HTTPS/2") : "HTTP";
+   console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
+   const persistedHostnames = store.loadRoutes().map((route) => route.hostname);
+   await reportHostsSyncHere(persistedHostnames, proxyPort, useHttps, lanMode);
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -52,7 +52,7 @@
+ declare const PORTLESS_HEADER = "X-Portless";
+ declare const HOSTS_SYNC_PATH = "/.portless/hosts-sync";
+ /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
+-type ProxyServer = http.Server | net.Server;
++type ProxyServer = (http.Server | net.Server) & { refreshTlsContexts?: () => Promise<void> };
+ /**
+  * Create an HTTP proxy server that routes requests based on the Host header.
+  *
