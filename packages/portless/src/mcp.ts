@@ -190,7 +190,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_start",
     "Start proxy",
-    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it.',
+    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it. Under Bun, HTTPS uses HTTP/1.1 with secure WebSocket upgrades and does not accept plain HTTP on the HTTPS listener.',
     {
       port: PORT_PROPERTY,
       noTls: { type: "boolean", description: "Serve plain HTTP instead of HTTPS." },
@@ -203,12 +203,13 @@ export const TOOLS: ToolDef[] = [
       },
       wildcard: {
         type: "boolean",
-        description: "Allow unregistered subdomains to fall back to their parent route.",
+        description:
+          "Allow unregistered subdomains to fall back to their parent route. Under Bun HTTPS, register each hostname explicitly so its TLS certificate can be prepared.",
       },
       unprivileged: {
         type: "boolean",
         description:
-          "Take a port below 1024 without sudo: bind the wildcard address and accept loopback peers only. Serves plain HTTP on port 80 unless HTTPS is requested, and turns off hosts sync.",
+          "Take a port below 1024 without sudo: bind the wildcard address and accept loopback peers only. Serves plain HTTP on port 80 unless HTTPS is requested, and turns off hosts sync. Outside LAN mode, Bun supports this option with plain HTTP only; use Node.js for HTTPS or omit unprivileged.",
       },
     },
     [],
@@ -779,6 +780,11 @@ export function printMcpHelp(): void {
       "Pass --tools with a comma separated list of profiles. The default is core.",
       "Aliases: default = core, full = all. Use the extraArgs argument on any tool",
       "to append CLI flags that are not typed into the tool schema.",
+      "",
+      "Bun HTTPS uses HTTP/1.1 and supports secure WebSocket upgrades.",
+      "Register each hostname; plain HTTP is not accepted on the HTTPS port.",
+      "Outside LAN mode, Bun supports unprivileged mode with plain HTTP only.",
+      "Use Node.js for unprivileged HTTPS, or omit unprivileged for a loopback bind.",
       "",
       "Environment:",
       "  PORTLESS_STATE_DIR  Directory for portless state.",

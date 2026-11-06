@@ -167,9 +167,11 @@ period.
 2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
 3. The browser hits `https://<name>.localhost`; the proxy forwards to the app's assigned port
 
-Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
+Outside LAN mode, unless `--unprivileged` is enabled, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
 
 With `--unprivileged` (or `PORTLESS_UNPRIVILEGED=1`) the proxy takes a port below 1024 without `sudo`: it binds the wildcard addresses, which macOS allows for non-root processes, and refuses every non-loopback peer itself. It serves plain HTTP on port 80 unless `--https` is given, because installing the CA would be a prompt; with `--https` the CA is generated but not installed, so run `portless trust` once yourself. It never writes the hosts file: automatic hosts sync is off, `PORTLESS_SYNC_HOSTS=1` together with it is refused, and Safari or a custom TLD need `portless hosts sync` run once by you. Linux needs `net.ipv4.ip_unprivileged_port_start` to cover the port; portless checks and prints the sysctl command instead of falling back to another port. The mode is remembered for auto-start and never triggers a sudo prompt, so it suits scripts, agents and managed machines.
+
+Outside LAN mode, Bun rejects `--unprivileged` with HTTPS before starting the proxy. Use Node.js for that combination, omit `--unprivileged` to use the normal loopback bind, or use `--no-tls` for plain HTTP.
 
 When portless itself returns an error (404 for an unknown host, 421 for a misdirected request, 502 when the app is unreachable, 508 for a request loop), the body depends on the `Accept` header. Browsers (`text/html`) get an HTML page. curl, `fetch`, and other clients get JSON such as `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`, with `error` set to `not_found`, `misdirected_request`, `bad_gateway`, or `loop_detected`. Parse that JSON instead of scraping HTML. Responses from the app itself are forwarded unchanged. Hostnames outside the portless TLDs, for example a site a DNS blocklist points at 127.0.0.1, get 421 Misdirected Request instead of the app list.
 
@@ -208,7 +210,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### HTTP/2 + HTTPS
 
-HTTPS with HTTP/2 is enabled by default (faster page loads for dev servers with many files). WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441 extended CONNECT), so dev server HMR works through the proxy. First run generates a local CA and adds it to the system trust store. After that, no prompts and no browser warnings.
+HTTPS with HTTP/2 is enabled by default under Node.js (faster page loads for dev servers with many files). Bun uses HTTP/1.1; see [Bun HTTPS compatibility](#bun-https-compatibility). WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441 extended CONNECT), so dev server HMR works through the proxy. First run generates a local CA and adds it to the system trust store. After that, no prompts and no browser warnings.
 
 ```bash
 portless proxy start --cert ./c.pem --key ./k.pem  # Use custom certs
@@ -217,6 +219,12 @@ portless trust                                      # Add CA to trust store late
 ```
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store. On WSL, it updates both the Linux trust store and the Windows current-user Root store so Windows browsers trust portless HTTPS certificates. Linux containers on a WSL2 host use only the Linux trust store.
+
+### Bun HTTPS compatibility
+
+When running the proxy under Bun, registered hostnames are prepared with exact TLS certificates before route publication. Bun currently negotiates HTTP/1.1 for these contexts; secure WebSocket upgrades still work. Use explicit registered names rather than unregistered wildcard subdomains. Plain HTTP redirects remain available on port 80, but plain HTTP on the HTTPS port itself is only supported under Node.
+
+The loopback-only `--unprivileged` mode supports plain HTTP only under Bun. HTTPS remains available with the normal loopback bind; use Node.js for loopback-only `--unprivileged --https`.
 
 ### LAN mode
 

@@ -100,6 +100,7 @@ import {
   isWildcardEnvEnabled,
   isLanEnvEnabled,
   isProxyRunning,
+  refreshProxyTls,
   isWindows,
   killTree,
   listenOnProxyInterface,
@@ -740,7 +741,7 @@ function reportHostsSyncHere(
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
 
-function startProxyServer(
+async function startProxyServer(
   store: RouteStore,
   proxyPort: number,
   tld: string,
@@ -750,7 +751,7 @@ function startProxyServer(
   strict?: boolean,
   customCert = false,
   unprivileged = false
-): void {
+): Promise<void> {
   store.ensureDir();
 
   const isTls = !!tlsOptions;
@@ -851,10 +852,20 @@ function startProxyServer(
     return "acted";
   };
 
-  const reloadRoutes = () => {
+  const reportTlsError = (error: unknown) => {
+    console.warn(
+      colors.yellow(
+        `Could not prepare a hostname's TLS context: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  };
+  const reloadRoutes = async () => {
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
+      await Promise.all(
+        [server, ...additionalServers].map((listener) => refreshProxyTls(listener, reportTlsError))
+      );
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
       }
@@ -876,20 +887,28 @@ function startProxyServer(
           }
         }
       }
-    } catch {
-      // File may be mid-write; keep existing cached routes
+    } catch (error) {
+      console.warn(
+        colors.yellow(
+          `Could not refresh routes or TLS contexts: ${error instanceof Error ? error.message : String(error)}`
+        )
+      );
     }
   };
 
   try {
     watcher = fs.watch(routesPath, () => {
       if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(reloadRoutes, DEBOUNCE_MS);
+      debounceTimer = setTimeout(() => {
+        void reloadRoutes();
+      }, DEBOUNCE_MS);
     });
   } catch {
     // fs.watch may not be supported; fall back to periodic polling
     console.warn(colors.yellow("fs.watch unavailable; falling back to polling for route changes"));
-    pollingInterval = setInterval(reloadRoutes, POLL_INTERVAL_MS);
+    pollingInterval = setInterval(() => {
+      void reloadRoutes();
+    }, POLL_INTERVAL_MS);
   }
 
   if (autoSyncHosts) {
@@ -904,7 +923,7 @@ function startProxyServer(
       // A route handed to a self-daemonized server outlives the file's last
       // change, so a dead owner triggers a reload instead of serving it.
       getRoutes: () => {
-        if (!cachedRoutes.every((route) => store.isRouteOwnerAlive(route))) reloadRoutes();
+        if (!cachedRoutes.every((route) => store.isRouteOwnerAlive(route))) void reloadRoutes();
         return cachedRoutes;
       },
       proxyPort,
@@ -953,7 +972,7 @@ function startProxyServer(
     process.exit(1);
   });
 
-  const proto = isTls ? "HTTPS/2" : "HTTP";
+  const proto = isTls ? (process.versions.bun ? "HTTPS (HTTP/1.1)" : "HTTPS/2") : "HTTP";
   const tldLabel = tlds.length > 1 || tld !== DEFAULT_TLD ? ` (TLDs: ${formatTldList(tlds)})` : "";
   const modeLabel = `${strict === false ? " (wildcard)" : ""}${loopbackOnly ? " (unprivileged, loopback peers only)" : ""}`;
 
@@ -970,6 +989,7 @@ function startProxyServer(
         );
       }
     });
+    await refreshProxyTls(additionalServer, reportTlsError);
     listenOnProxyInterface(additionalServer, proxyPort, bindTarget, () => {
       console.log(
         colors.green(
@@ -999,6 +1019,7 @@ function startProxyServer(
     }
   }
 
+  await refreshProxyTls(server, reportTlsError);
   listenOnProxyInterface(server, proxyPort, primaryBindTarget, () => {
     if (!writeHostsSyncToken(store.dir, hostsSyncToken)) {
       console.warn(colors.yellow("Could not publish hosts sync authorization."));
@@ -1261,8 +1282,7 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
 }
 
 type EnsureProxyResult =
-  | { started: true; state: Awaited<ReturnType<typeof discoverState>> }
-  | { started: false };
+  { started: true; state: Awaited<ReturnType<typeof discoverState>> } | { started: false };
 
 interface ProxyDesiredState {
   explicit: ProxyConfigExplicitness;
@@ -2136,13 +2156,18 @@ ${colors.bold("How it works:")}
      --, is env-prefixed (NODE_ENV=production vite), delegates to another
      script, or is invoked with runner flags before the script name
      (bun run --bun dev); set the port in those yourself
-  6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
+  6. The proxy binds to 127.0.0.1 and ::1 by default. Unprivileged mode
+     binds the wildcard address and accepts loopback peers only.
   7. Proxy errors (404, 421 misdirected, 502, 508) are an HTML page for browsers and JSON
      ({"error","upstream","message"}) for clients that do not accept text/html
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 
 ${colors.bold("HTTP/2 + HTTPS (default):")}
   HTTPS with HTTP/2 multiplexing is enabled by default (faster page loads).
+  Bun uses HTTP/1.1 with prepared certificates for registered hostnames.
+  Under Bun, HTTP redirects use port 80, not the HTTPS port itself.
+  Loopback-only unprivileged mode supports plain HTTP only under Bun;
+  use Node.js for HTTPS in that mode.
   WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441
   extended CONNECT), so dev server HMR works through the proxy.
   On first use, portless generates a local CA and adds it to your
@@ -2153,7 +2178,7 @@ ${colors.bold("HTTP/2 + HTTPS (default):")}
 ${colors.bold("LAN mode:")}
   Use --lan to make services accessible from other devices (phones,
   tablets) on the same WiFi network via mDNS (.local domains).
-  Normal mode binds only to 127.0.0.1 and ::1.
+  Normal mode binds only to 127.0.0.1 and ::1 unless --unprivileged is set.
   LAN mode binds to 0.0.0.0 and ::.
   Useful for testing React Native / Expo apps on real devices.
   Expo keeps Metro's default LAN host behavior in this mode.
@@ -2196,7 +2221,8 @@ ${colors.bold("Options:")}
                                 address and accept loopback peers only. Serves plain
                                 HTTP on port 80 unless --https is also given, and
                                 never writes the hosts file. Remembered after
-                                stop; PORTLESS_UNPRIVILEGED=0 switches back
+                                stop; PORTLESS_UNPRIVILEGED=0 switches back.
+                                Under Bun, loopback-only mode requires --no-tls
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
   --https                       Enable HTTPS (default, accepted for compatibility)
   --lan                         Enable LAN mode (mDNS .local, for real device testing)
@@ -3481,6 +3507,12 @@ ${colors.bold("LAN mode (--lan):")}
     return;
   }
 
+  if (process.versions.bun && desiredUnprivileged && useHttps && !lanMode) {
+    console.error(colors.red("Error: Bun cannot start loopback-only HTTPS with --unprivileged."));
+    console.error(colors.blue("Use Node.js, omit --unprivileged, or use --no-tls."));
+    process.exit(1);
+  }
+
   if (lanMode) {
     const mdnsSupport = isMdnsSupported();
     if (!mdnsSupport.supported) {
@@ -3694,7 +3726,7 @@ ${colors.bold("LAN mode (--lan):")}
   // Foreground mode: run the proxy directly in this process
   if (isForeground) {
     console.log(chalk.blue.bold("\nportless proxy\n"));
-    startProxyServer(
+    await startProxyServer(
       store,
       proxyPort,
       tld,
@@ -3764,7 +3796,7 @@ ${colors.bold("LAN mode (--lan):")}
     process.exit(1);
   }
 
-  const proto = useHttps ? "HTTPS/2" : "HTTP";
+  const proto = useHttps ? (process.versions.bun ? "HTTPS (HTTP/1.1)" : "HTTPS/2") : "HTTP";
   console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
   // The daemon syncs the routes that were already persisted; its own output only
   // reaches proxy.log, so report here where the user is.

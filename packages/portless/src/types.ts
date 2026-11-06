@@ -33,6 +33,8 @@ export interface ProxyServerOptions {
    * When true, refuse every connection whose peer is not a loopback address:
    * at accept time, and again per request and per upgrade. Set when the proxy
    * binds the wildcard address only to take a privileged port without root.
+   * Combining this option with tls throws under Bun. Bind a Bun HTTPS listener
+   * to a loopback address without this option, or use Node.js.
    */
   loopbackOnly?: boolean;
   /** Optional error logger; defaults to console.error. */
@@ -40,7 +42,7 @@ export interface ProxyServerOptions {
   /** Run the daemon-owned hosts sync for the current route table. */
   onHostsSyncRequest?: () => "acted" | "disabled";
   hostsSyncToken?: string;
-  /** When provided, enables HTTP/2 over TLS (HTTPS). */
+  /** Enables HTTPS with HTTP/2 under Node.js or HTTP/1.1 under Bun. */
   tls?: {
     cert: Buffer;
     key: Buffer;
